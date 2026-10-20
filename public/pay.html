@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pay $0.01 · x402 Markdown Endpoint</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:0 1rem;line-height:1.45;color:#111}
+input{width:100%;padding:.5rem;font-size:1rem;box-sizing:border-box}button{padding:.6rem 1rem;font-size:1rem;margin:.5rem .5rem .5rem 0;cursor:pointer}
+pre{background:#f4f4f4;padding:.75rem;overflow:auto;white-space:pre-wrap;word-break:break-word;max-height:420px}
+#log div{font-family:ui-monospace,monospace;font-size:.85rem}.err{color:#b00}.ok{color:#070}
+</style></head><body>
+<h1>x402 Markdown Endpoint: pay once</h1>
+<p>Converts a web page to clean Markdown. Costs <b>$0.01 USDC on Base</b>, paid with a gasless signature (EIP-3009). The facilitator pays the gas. You only sign typed data. No transaction is sent from your wallet.</p>
+<label>Page URL to convert<input id="url" value="https://example.com"></label>
+<div><button id="connect">1. Connect wallet</button><button id="pay" disabled>2. Fetch requirements and pay</button></div>
+<div id="who"></div>
+<h3>Payment requirements</h3><pre id="reqs">(not loaded)</pre>
+<h3>Log</h3><div id="log"></div>
+<h3>Result</h3><div id="tx"></div><pre id="out">(none)</pre>
+<script>
+const $ = (id) => document.getElementById(id);
+const log = (m, c = "") => { const d = document.createElement("div"); d.className = c; d.textContent = m; $("log").appendChild(d); };
+const BASE = { chainId: "0x2105", chainName: "Base", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, rpcUrls: ["https://mainnet.base.org"], blockExplorerUrls: ["https://basescan.org"] };
+let account;
+const b64enc = (o) => btoa(unescape(encodeURIComponent(JSON.stringify(o))));
+const b64dec = (s) => JSON.parse(decodeURIComponent(escape(atob(s))));
+
+// Exposed for testing: parse a 402 response into PaymentRequired.
+async function parse402(res) {
+  const h = res.headers.get("PAYMENT-REQUIRED");
+  let pr = null;
+  if (h) { try { pr = b64dec(h); } catch {} }
+  if (!pr) pr = await res.json();
+  const req = (pr.accepts || []).find((a) => a.scheme === "exact" && (a.network === "eip155:8453" || a.network === "base"));
+  if (!req) throw new Error("No Base 'exact' payment option in 402 response");
+  return { pr, req };
+}
+window.parse402 = parse402;
+
+function typedData(req, from, nonce, validAfter, validBefore) {
+  return {
+    types: {
+      EIP712Domain: [{ name: "name", type: "string" }, { name: "version", type: "string" }, { name: "chainId", type: "uint256" }, { name: "verifyingContract", type: "address" }],
+      TransferWithAuthorization: [{ name: "from", type: "address" }, { name: "to", type: "address" }, { name: "value", type: "uint256" }, { name: "validAfter", type: "uint256" }, { name: "validBefore", type: "uint256" }, { name: "nonce", type: "bytes32" }],
+    },
+    primaryType: "TransferWithAuthorization",
+    domain: { name: req.extra?.name || "USD Coin", version: req.extra?.version || "2", chainId: 8453, verifyingContract: req.asset },
+    message: { from, to: req.payTo, value: req.amount, validAfter, validBefore, nonce },
+  };
+}
+window.typedData = typedData;
+
+$("connect").onclick = async () => {
+  try {
+    if (!window.ethereum) throw new Error("No injected wallet found. Install MetaMask or Coinbase Wallet, or open this page in the wallet's browser.");
+    [account] = await ethereum.request({ method: "eth_requestAccounts" });
+    try { await ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BASE.chainId }] }); }
+    catch (e) { if (e.code === 4902) await ethereum.request({ method: "wallet_addEthereumChain", params: [BASE] }); else throw e; }
+    const cid = await ethereum.request({ method: "eth_chainId" });
+    if (cid.toLowerCase() !== BASE.chainId) throw new Error("Wallet is not on Base (8453)");
+    $("who").textContent = "Connected: " + account + " on Base";
+    $("pay").disabled = false; log("Wallet connected on Base", "ok");
+  } catch (e) { log(e.message || String(e), "err"); }
+};
+
+$("pay").onclick = async () => {
+  $("pay").disabled = true;
+  try {
+    const endpoint = location.origin + "/markdown?url=" + encodeURIComponent($("url").value.trim());
+    log("GET " + endpoint);
+    const r1 = await fetch(endpoint);
+    if (r1.status !== 402) throw new Error("Expected 402, got " + r1.status);
+    const { pr, req } = await parse402(r1);
+    $("reqs").textContent = JSON.stringify(req, null, 2);
+    log(`Price: ${Number(req.amount) / 1e6} USDC to ${req.payTo}`);
+    const now = Math.floor(Date.now() / 1000);
+    const validAfter = String(now - 600), validBefore = String(now + (req.maxTimeoutSeconds || 120));
+    const nonce = "0x" + [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, "0")).join("");
+    const td = typedData(req, account, nonce, validAfter, validBefore);
+    log("Requesting signature (eth_signTypedData_v4)...");
+    const signature = await ethereum.request({ method: "eth_signTypedData_v4", params: [account, JSON.stringify(td)] });
+    const payment = { x402Version: 2, resource: pr.resource, accepted: req,
+      payload: { signature, authorization: { from: account, to: req.payTo, value: req.amount, validAfter, validBefore, nonce } } };
+    const hdr = b64enc(payment);
+    log("Retrying with PAYMENT-SIGNATURE header...");
+    const r2 = await fetch(endpoint, { headers: { "PAYMENT-SIGNATURE": hdr, "X-PAYMENT": hdr } });
+    const body = await r2.json().catch(() => ({}));
+    if (!r2.ok) throw new Error(`Payment failed (${r2.status}): ${body.error || ""} ${body.detail ? JSON.stringify(body.detail) : ""}`);
+    const pres = r2.headers.get("PAYMENT-RESPONSE") || r2.headers.get("X-PAYMENT-RESPONSE");
+    if (pres) { const s = b64dec(pres); const tx = s.transaction || s.txHash;
+      $("tx").innerHTML = tx ? `Settled: <a target="_blank" href="https://basescan.org/tx/${tx}">${tx}</a>` : "Settled: " + JSON.stringify(s);
+      log("Settlement: " + JSON.stringify(s), "ok"); }
+    $("out").textContent = (body.title ? "# " + body.title + "\n\n" : "") + (body.markdown || JSON.stringify(body, null, 2));
+    log("Done", "ok");
+  } catch (e) { log(e.message || String(e), "err"); }
+  $("pay").disabled = false;
+};
+</script></body></html>

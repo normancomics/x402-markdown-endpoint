@@ -7,6 +7,7 @@ const b64=o=>Buffer.from(JSON.stringify(o)).toString('base64');
 function reqs(){return {scheme:'exact',network:'eip155:8453',amount:'10000',asset:'0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',payTo:PAY_TO,maxTimeoutSeconds:120,extra:{name:'USD Coin',version:'2'}}}
 function pr(err){return {x402Version:2,error:err,resource:{url:PUBLIC+'/markdown',description:'Fetch any public web page and return clean, readable Markdown (Readability main-content extraction). GET /markdown?url=<page>',mimeType:'application/json'},accepts:[reqs()],
  extensions:{bazaar:{info:{input:{type:'http',method:'GET',queryParams:{url:'https://example.com'}},output:{type:'json',example:{title:'Example Domain',markdown:'# Example Domain ...'}}},schema:{type:'object',properties:{input:{type:'object',properties:{queryParams:{type:'object',properties:{url:{type:'string',description:'Public http(s) URL to convert'}},required:['url']}}}}}}}}}
+app.get('/pay',(q,r)=>r.sendFile(require('path').join(__dirname,'public','pay.html')));
 app.get('/',(q,r)=>r.json({service:'web-to-markdown',paid:'GET /markdown?url=... $0.01 USDC on Base (x402 v2)',payTo:PAY_TO}));
 app.get('/markdown',async(q,r)=>{
  const sig=q.get('payment-signature')||q.get('x-payment');
